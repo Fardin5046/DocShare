@@ -2,5 +2,10 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.78.0",
     "lucide-react": "^0.548.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
   }
 }
