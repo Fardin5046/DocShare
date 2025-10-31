@@ -1,322 +1,188 @@
-'use client';
+'use client'
 
-import { useState, useEffect, useRef } from 'react';
-import {
-  createClient,
-  uploadFile,
-  sendMessage,
-  getMessages,
-} from '@/lib/supabase';
-import {
-  Users,
-  LogOut,
-  Search,
-  Paperclip,
-  Send,
-  FileText,
-  Download,
-  MessageSquare,
-  UserPlus,
-  Check,
-} from 'lucide-react';
+import { useState, useEffect, useRef } from 'react'
+import { createClient, uploadFile, sendMessage, getMessages } from '@/lib/supabase'
+import { Users, LogOut, Search, Paperclip, Send, FileText, Download, MessageSquare } from 'lucide-react'
 
 export default function ChatApp({ session }) {
-  const supabase = createClient();
+  const [activeTab, setActiveTab] = useState('friends')
+  const [friends, setFriends] = useState([])
+  const [groups, setGroups] = useState([])
+  const [friendRequests, setFriendRequests] = useState([])
+  const [selectedChat, setSelectedChat] = useState(null) // {type, id, displayName}
+  const [messages, setMessages] = useState([])
+  const [newMessage, setNewMessage] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [loading, setLoading] = useState(false)
 
-  // tabs / data
-  const [activeTab, setActiveTab] = useState('friends');
-  const [friends, setFriends] = useState([]);
-  const [groups, setGroups] = useState([]);
-  const [friendRequests, setFriendRequests] = useState([]);
+  const fileInputRef = useRef(null)
+  const messagesEndRef = useRef(null)
+  const supabase = createClient()
 
-  // chat
-  const [selectedChat, setSelectedChat] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
-  const messagesEndRef = useRef(null);
-
-  // files
-  const [loading, setLoading] = useState(false);
-  const fileInputRef = useRef(null);
-
-  // search
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searchError, setSearchError] = useState('');
-
-  // ---------------------------------------------------------------------------
-  // Initial loads
-  // ---------------------------------------------------------------------------
   useEffect(() => {
-    loadFriends();
-    loadGroups();
-    loadFriendRequests();
-  }, []);
+    loadFriends()
+    loadGroups()
+    loadFriendRequests()
+  }, [])
 
-  // When chat changes, load + subscribe
   useEffect(() => {
-    if (!selectedChat) return;
+    if (selectedChat) {
+      loadMessages()
+      const unsub = subscribeToMessages()
+      return unsub
+    }
+  }, [selectedChat])
 
-    loadMessages();
-
-    // subscribe and clean up properly when chat changes/unmounts
-    const unsubscribe = subscribeToMessages();
-    return () => {
-      unsubscribe?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedChat]);
-
-  // Always scroll to last message
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
-  // Debounced search when searchQuery changes
-  useEffect(() => {
-    const t = setTimeout(() => {
-      runSearch(searchQuery);
-    }, 250);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery, friends.length]);
-
-  // ---------------------------------------------------------------------------
-  // Data loaders
-  // ---------------------------------------------------------------------------
+  // ---------- load lists ----------
   const loadFriends = async () => {
     const { data, error } = await supabase
       .from('friendships')
-      .select('*, friend:profiles!friend_id(*)')
+      .select('friend:profiles!friend_id(id, email, full_name)')
       .eq('user_id', session.user.id)
-      .eq('status', 'accepted');
+      .eq('status', 'accepted')
 
     if (!error && data) {
-      setFriends(
-        data
-          .map((f) => f.friend)
-          .filter(Boolean)
-          .map((p) => ({
-            id: p.id,
-            name: p.full_name || p.name || p.email,
-            email: p.email,
-          }))
-      );
+      setFriends(data.map((f) => f.friend))
     }
-  };
+  }
 
   const loadGroups = async () => {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('group_members')
-      .select('*, group:groups(*)')
-      .eq('user_id', session.user.id);
+      .select('group:groups(id, name)')
+      .eq('user_id', session.user.id)
 
-    if (!error && data) {
-      setGroups(
-        data
-          .map((g) => g.group)
-          .filter(Boolean)
-          .map((g) => ({ id: g.id, name: g.name }))
-      );
-    }
-  };
+    if (data) setGroups(data.map((g) => g.group))
+  }
 
   const loadFriendRequests = async () => {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('friendships')
-      .select('*, from:profiles!user_id(*)')
+      .select('id, from:profiles!user_id(id, email, full_name)')
       .eq('friend_id', session.user.id)
-      .eq('status', 'pending');
+      .eq('status', 'pending')
 
-    if (!error && data) setFriendRequests(data);
-  };
+    if (data) setFriendRequests(data)
+  }
 
+  // ---------- messages ----------
   const loadMessages = async () => {
     try {
       const data = await getMessages(
         supabase,
-        selectedChat.type === 'friend' ? selectedChat.id : null,
-        selectedChat.type === 'group' ? selectedChat.id : null
-      );
-      setMessages(data || []);
-    } catch (error) {
-      console.error('Error loading messages:', error);
+        selectedChat?.type === 'friend' ? selectedChat.id : null,
+        selectedChat?.type === 'group' ? selectedChat.id : null
+      )
+      setMessages(data)
+    } catch (err) {
+      console.error('Error loading messages:', err)
     }
-  };
+  }
 
-  // ---------------------------------------------------------------------------
-  // Realtime subscription
-  // ---------------------------------------------------------------------------
   const subscribeToMessages = () => {
-    const ch = supabase
+    const channel = supabase
       .channel('messages')
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
-          // Only reload for messages related to the open conversation
-          if (selectedChat?.type === 'group') {
-            if (payload.new.group_id === selectedChat.id) {
-              loadMessages();
-            }
-          } else if (selectedChat?.type === 'friend') {
-            const a = session.user.id;
-            const b = selectedChat.id;
-            const { sender_id, receiver_id } = payload.new;
-            const involvesPair =
-              (sender_id === a && receiver_id === b) ||
-              (sender_id === b && receiver_id === a);
-            if (involvesPair) loadMessages();
+          if (
+            (selectedChat?.type === 'friend' &&
+              (payload.new.receiver_id === selectedChat.id || payload.new.sender_id === selectedChat.id)) ||
+            (selectedChat?.type === 'group' && payload.new.group_id === selectedChat.id)
+          ) {
+            loadMessages()
           }
         }
       )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(ch);
-    };
-  };
-
-  // ---------------------------------------------------------------------------
-  // Search (email OR full_name OR name) + friend request
-  // ---------------------------------------------------------------------------
-  async function runSearch(term) {
-  const q = (term || '').trim();
-  if (!q) {
-    setSearchResults([]);
-    setSearchError('');
-    return;
+      .subscribe()
+    return () => supabase.removeChannel(channel)
   }
 
-  // Only columns that actually exist in your profiles table
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, email, avatar_url, name')
-    .or(`email.ilike.%${q}%,name.ilike.%${q}%`)
-    .neq('id', session.user.id)
-    .limit(20);
-
-  if (error) {
-    setSearchError(error.message || 'Search failed');
-    setSearchResults([]);
-    return;
-  }
-
-  const friendIds = new Set(friends.map((f) => f.id));
-
-  const rows = (data || []).map((r) => ({
-    id: r.id,
-    name: r.name || r.email,      // <-- fallback done in JS
-    email: r.email,
-    isFriend: friendIds.has(r.id),
-  }));
-
-  setSearchError('');
-  setSearchResults(rows);
-}
-
-
-  async function sendFriendRequest(targetUserId) {
-    // Prevent duplicates
-    const { error } = await supabase.from('friendships').insert({
-      user_id: session.user.id,
-      friend_id: targetUserId,
-      status: 'pending',
-    });
-    if (error) {
-      alert(error.message);
-      return;
+  // ---------- search users (by email or full_name) ----------
+  useEffect(() => {
+    const q = searchQuery.trim()
+    if (!q) {
+      setSearchResults([])
+      return
     }
-    alert('Request sent!');
-    setSearchResults((prev) =>
-      prev.map((p) =>
-        p.id === targetUserId ? { ...p, isFriend: true } : p
-      )
-    );
+    const t = setTimeout(() => searchUsers(q), 250)
+    return () => clearTimeout(t)
+  }, [searchQuery])
+
+  async function searchUsers(q) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, email, full_name, avatar_url')
+      .or(`email.ilike.*${q}*,full_name.ilike.*${q}*`)
+      .limit(10)
+
+    if (!error) setSearchResults(data || [])
   }
 
-  // ---------------------------------------------------------------------------
-  // File + messages
-  // ---------------------------------------------------------------------------
+  // ---------- actions ----------
   const handleFileUpload = async (file) => {
-    if (!file) return;
+    if (!file) return
     if (file.size > 100 * 1024 * 1024) {
-      alert('File size exceeds 100MB limit');
-      return;
+      alert('File size exceeds 100MB limit')
+      return
     }
 
-    setLoading(true);
+    setLoading(true)
     try {
-      const { path, url } = await uploadFile(supabase, file, session.user.id);
-
+      const { url } = await uploadFile(supabase, file, session.user.id)
       await sendMessage(supabase, {
         sender_id: session.user.id,
-        receiver_id: selectedChat.type === 'friend' ? selectedChat.id : null,
-        group_id: selectedChat.type === 'group' ? selectedChat.id : null,
+        receiver_id: selectedChat?.type === 'friend' ? selectedChat.id : null,
+        group_id: selectedChat?.type === 'group' ? selectedChat.id : null,
         message_type: 'file',
         content: newMessage || 'Shared a file',
         file_name: file.name,
         file_url: url,
-        file_size: file.size,
-      });
-
-      setNewMessage('');
-      loadMessages();
-    } catch (error) {
-      alert('Error uploading file: ' + error.message);
+        file_size: file.size
+      })
+      setNewMessage('')
+      loadMessages()
+    } catch (err) {
+      alert('Error uploading file: ' + err.message)
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  };
-
-  const handlePaste = async (e) => {
-    const items = e.clipboardData.items;
-    for (let item of items) {
-      if (item.type.indexOf('image') !== -1) {
-        const file = item.getAsFile();
-        await handleFileUpload(file);
-      }
-    }
-  };
+  }
 
   const handleSendMessage = async () => {
-    if (!newMessage.trim()) return;
-
+    if (!newMessage.trim() || !selectedChat) return
     try {
       await sendMessage(supabase, {
         sender_id: session.user.id,
         receiver_id: selectedChat.type === 'friend' ? selectedChat.id : null,
         group_id: selectedChat.type === 'group' ? selectedChat.id : null,
         message_type: 'text',
-        content: newMessage,
-      });
-
-      setNewMessage('');
-      loadMessages();
-    } catch (error) {
-      alert('Error sending message: ' + error.message);
+        content: newMessage
+      })
+      setNewMessage('')
+      loadMessages()
+    } catch (err) {
+      alert('Error sending message: ' + err.message)
     }
-  };
+  }
 
   const acceptFriendRequest = async (requestId) => {
-    const { error } = await supabase
-      .from('friendships')
-      .update({ status: 'accepted' })
-      .eq('id', requestId);
-
-    if (!error) {
-      loadFriends();
-      loadFriendRequests();
-    }
-  };
+    await supabase.from('friendships').update({ status: 'accepted' }).eq('id', requestId)
+    loadFriends()
+    loadFriendRequests()
+  }
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
-  };
+    await supabase.auth.signOut()
+  }
 
-  // ---------------------------------------------------------------------------
-  // UI
-  // ---------------------------------------------------------------------------
+  // ---------- UI ----------
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
@@ -324,10 +190,7 @@ export default function ChatApp({ session }) {
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-semibold text-gray-800">DocShare</h1>
-            <button
-              onClick={handleSignOut}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-            >
+            <button onClick={handleSignOut} className="p-2 hover:bg-gray-100 rounded-lg">
               <LogOut className="w-5 h-5 text-gray-600" />
             </button>
           </div>
@@ -343,46 +206,34 @@ export default function ChatApp({ session }) {
             />
           </div>
 
-          {/* Search results dropdown area */}
-          {searchQuery && (
-            <div className="mt-3 max-h-72 overflow-y-auto border border-gray-200 rounded-lg">
-              {searchError ? (
-                <div className="p-3 text-sm text-red-600">{searchError}</div>
-              ) : searchResults.length === 0 ? (
-                <div className="p-3 text-sm text-gray-500">No results</div>
-              ) : (
-                <ul className="divide-y">
-                  {searchResults.map((u) => (
-                    <li key={u.id} className="p-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 text-white flex items-center justify-center text-sm font-semibold">
-                          {(u.name || u.email).charAt(0).toUpperCase()}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium">
-                            {u.name}
-                          </div>
-                          <div className="truncate text-xs text-gray-500">
-                            {u.email}
-                          </div>
-                        </div>
-                        {u.isFriend ? (
-                          <span className="inline-flex items-center gap-1 text-green-600 text-xs">
-                            <Check className="w-4 h-4" /> Friend
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => sendFriendRequest(u.id)}
-                            className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
-                          >
-                            <UserPlus className="w-4 h-4" /> Add
-                          </button>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+          {/* search results (tap to open chat) */}
+          {searchResults.length > 0 && (
+            <div className="mt-3 max-h-56 overflow-y-auto border border-gray-200 rounded-lg">
+              {searchResults.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => {
+                    setSelectedChat({
+                      type: 'friend',
+                      id: u.id,
+                      displayName: u.full_name || u.email
+                    })
+                    setSearchResults([])
+                    setSearchQuery('')
+                  }}
+                  className="w-full text-left p-3 hover:bg-gray-50 border-b last:border-b-0"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-blue-600/10 text-blue-700 font-semibold flex items-center justify-center">
+                      {(u.full_name || u.email).charAt(0).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-800 truncate">{u.full_name || u.email}</div>
+                      {u.full_name && <div className="text-xs text-gray-500 truncate">{u.email}</div>}
+                    </div>
+                  </div>
+                </button>
+              ))}
             </div>
           )}
         </div>
@@ -390,62 +241,42 @@ export default function ChatApp({ session }) {
         <div className="flex border-b border-gray-200">
           <button
             onClick={() => setActiveTab('friends')}
-            className={`flex-1 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'friends'
-                ? 'text-blue-600 border-b-2 border-blue-600'
-                : 'text-gray-600 hover:text-gray-800'
-            }`}
+            className={`flex-1 py-3 text-sm font-medium ${activeTab === 'friends' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-600 hover:text-gray-800'}`}
           >
             Friends
           </button>
           <button
             onClick={() => setActiveTab('groups')}
-            className={`flex-1 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'groups'
-                ? 'text-blue-600 border-b-2 border-blue-600'
-                : 'text-gray-600 hover:text-gray-800'
-            }`}
+            className={`flex-1 py-3 text-sm font-medium ${activeTab === 'groups' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-600 hover:text-gray-800'}`}
           >
             Groups
           </button>
           <button
             onClick={() => setActiveTab('requests')}
-            className={`flex-1 py-3 text-sm font-medium transition-colors relative ${
-              activeTab === 'requests'
-                ? 'text-blue-600 border-b-2 border-blue-600'
-                : 'text-gray-600 hover:text-gray-800'
-            }`}
+            className={`flex-1 py-3 text-sm font-medium ${activeTab === 'requests' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-600 hover:text-gray-800'}`}
           >
             Requests
-            {friendRequests.length > 0 && (
-              <span className="absolute top-2 right-4 w-2 h-2 bg-red-500 rounded-full" />
-            )}
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto scrollbar-hide">
+        <div className="flex-1 overflow-y-auto">
           {activeTab === 'friends' && (
             <div>
               {friends.map((friend) => (
                 <button
                   key={friend.id}
-                  onClick={() => {
-                    setSelectedChat({ type: 'friend', ...friend });
-                    setSearchQuery('');
-                  }}
-                  className="w-full p-4 hover:bg-gray-50 transition-colors border-b border-gray-100 text-left"
+                  onClick={() =>
+                    setSelectedChat({ type: 'friend', id: friend.id, displayName: friend.full_name || friend.email })
+                  }
+                  className="w-full p-4 hover:bg-gray-50 border-b text-left"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white font-semibold">
-                      {(friend.name || friend.email).charAt(0)}
+                    <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full text-white font-semibold flex items-center justify-center">
+                      {(friend.full_name || friend.email).charAt(0)}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800 truncate">
-                        {friend.name}
-                      </p>
-                      <p className="text-sm text-gray-500 truncate">
-                        {friend.email}
-                      </p>
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 truncate">{friend.full_name || friend.email}</p>
+                      {friend.full_name && <p className="text-sm text-gray-500 truncate">{friend.email}</p>}
                     </div>
                   </div>
                 </button>
@@ -458,17 +289,15 @@ export default function ChatApp({ session }) {
               {groups.map((group) => (
                 <button
                   key={group.id}
-                  onClick={() => setSelectedChat({ type: 'group', ...group })}
-                  className="w-full p-4 hover:bg-gray-50 transition-colors border-b border-gray-100 text-left"
+                  onClick={() => setSelectedChat({ type: 'group', id: group.id, displayName: group.name })}
+                  className="w-full p-4 hover:bg-gray-50 border-b text-left"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-teal-500 rounded-full flex items-center justify-center text-white">
+                    <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-teal-500 rounded-full text-white flex items-center justify-center">
                       <Users className="w-5 h-5" />
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800 truncate">
-                        {group.name}
-                      </p>
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 truncate">{group.name}</p>
                     </div>
                   </div>
                 </button>
@@ -478,26 +307,20 @@ export default function ChatApp({ session }) {
 
           {activeTab === 'requests' && (
             <div>
-              {friendRequests.map((request) => (
-                <div key={request.id} className="p-4 border-b border-gray-100">
+              {friendRequests.map((r) => (
+                <div key={r.id} className="p-4 border-b">
                   <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-pink-500 rounded-full flex items-center justify-center text-white font-semibold">
-                      {(request.from?.full_name ||
-                        request.from?.name ||
-                        request.from?.email ||
-                        'U'
-                      ).charAt(0)}
+                    <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-pink-500 rounded-full text-white font-semibold flex items-center justify-center">
+                      {(r.from?.full_name || r.from?.email || 'U').charAt(0)}
                     </div>
-                    <div className="flex-1 min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="font-medium text-gray-800">
-                        {request.from?.full_name ||
-                          request.from?.name ||
-                          request.from?.email}
+                        {r.from?.full_name || r.from?.email}
                       </p>
                       <div className="flex gap-2 mt-2">
                         <button
-                          onClick={() => acceptFriendRequest(request.id)}
-                          className="flex-1 py-2 px-3 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors"
+                          onClick={() => acceptFriendRequest(r.id)}
+                          className="flex-1 py-2 px-3 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
                         >
                           Accept
                         </button>
@@ -511,30 +334,24 @@ export default function ChatApp({ session }) {
         </div>
       </div>
 
-      {/* Chat Area */}
+      {/* Chat area */}
       <div className="flex-1 flex flex-col">
         {selectedChat ? (
           <>
-            <div className="h-16 bg-white border-b border-gray-200 flex items-center px-6">
-              <p className="font-semibold text-gray-800">{selectedChat.name}</p>
+            <div className="h-16 bg-white border-b flex items-center px-6">
+              <p className="font-semibold text-gray-800">{selectedChat.displayName}</p>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-hide">
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
               {messages.map((msg) => (
                 <div key={msg.id} className="flex gap-3">
-                  <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">
-                    {(msg.sender?.full_name ||
-                      msg.sender?.name ||
-                      msg.sender?.email ||
-                      'U'
-                    ).charAt(0)}
+                  <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full text-white text-sm font-semibold flex items-center justify-center">
+                    {(msg.sender?.full_name || 'U').charAt(0)}
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="font-medium text-gray-800 text-sm">
-                        {msg.sender?.full_name ||
-                          msg.sender?.name ||
-                          msg.sender?.email}
+                        {msg.sender?.full_name || 'Unknown'}
                       </span>
                       <span className="text-xs text-gray-400">
                         {new Date(msg.created_at).toLocaleTimeString()}
@@ -542,28 +359,20 @@ export default function ChatApp({ session }) {
                     </div>
 
                     {msg.message_type === 'file' ? (
-                      <div className="bg-white border border-gray-200 rounded-lg p-4 max-w-md">
+                      <div className="bg-white border rounded-lg p-4 max-w-md">
                         <div className="flex items-start gap-3">
                           <FileText className="w-5 h-5 text-blue-600" />
                           <div className="flex-1">
-                            <p className="font-medium text-gray-800">
-                              {msg.file_name}
-                            </p>
-                            <p className="text-sm text-gray-600 mt-1">
-                              {msg.content}
-                            </p>
+                            <p className="font-medium text-gray-800">{msg.file_name}</p>
+                            <p className="text-sm text-gray-600 mt-1">{msg.content}</p>
                           </div>
-                          <a
-                            href={msg.file_url}
-                            download
-                            className="p-2 hover:bg-gray-100 rounded-lg"
-                          >
+                          <a href={msg.file_url} download className="p-2 hover:bg-gray-100 rounded-lg">
                             <Download className="w-4 h-4 text-gray-600" />
                           </a>
                         </div>
                       </div>
                     ) : (
-                      <div className="bg-white border border-gray-200 rounded-lg p-3 max-w-md">
+                      <div className="bg-white border rounded-lg p-3 max-w-md">
                         <p className="text-gray-700">{msg.content}</p>
                       </div>
                     )}
@@ -573,32 +382,27 @@ export default function ChatApp({ session }) {
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="bg-white border-t border-gray-200 p-4">
+            <div className="bg-white border-t p-4">
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  onPaste={handlePaste}
                   onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder="Type a message or paste screenshot (Ctrl+V)…"
+                  placeholder="Type a message…"
                   disabled={loading}
-                  className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="flex-1 px-4 py-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                <label className="p-3 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer transition-colors">
+                <label className="p-3 bg-gray-100 hover:bg-gray-200 rounded-lg cursor-pointer">
                   <input
                     ref={fileInputRef}
                     type="file"
-                    onChange={(e) => handleFileUpload(e.target.files[0])}
+                    onChange={(e) => e.target.files[0] && handleFileUpload(e.target.files[0])}
                     className="hidden"
                   />
                   <Paperclip className="w-5 h-5 text-gray-600" />
                 </label>
-                <button
-                  onClick={handleSendMessage}
-                  disabled={loading}
-                  className="px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-                >
+                <button onClick={handleSendMessage} disabled={loading} className="px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
                   <Send className="w-4 h-4" />
                 </button>
               </div>
@@ -614,5 +418,5 @@ export default function ChatApp({ session }) {
         )}
       </div>
     </div>
-  );
+  )
 }
