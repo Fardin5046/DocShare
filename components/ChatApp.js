@@ -1,71 +1,135 @@
-'use client'
+'use client';
 
-import { useState, useEffect, useRef } from 'react'
-import { createClient, uploadFile, sendMessage, getMessages } from '@/lib/supabase'
-import { 
-  Users, UserPlus, LogOut, Search, Paperclip, Send, 
-  FileImage, FileText, Download, X, Check, Plus, MessageSquare 
-} from 'lucide-react'
+import { useState, useEffect, useRef } from 'react';
+import {
+  createClient,
+  uploadFile,
+  sendMessage,
+  getMessages,
+} from '@/lib/supabase';
+import {
+  Users,
+  LogOut,
+  Search,
+  Paperclip,
+  Send,
+  FileText,
+  Download,
+  MessageSquare,
+  UserPlus,
+  Check,
+} from 'lucide-react';
 
 export default function ChatApp({ session }) {
-  const [activeTab, setActiveTab] = useState('friends')
-  const [friends, setFriends] = useState([])
-  const [groups, setGroups] = useState([])
-  const [friendRequests, setFriendRequests] = useState([])
-  const [selectedChat, setSelectedChat] = useState(null)
-  const [messages, setMessages] = useState([])
-  const [newMessage, setNewMessage] = useState('')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [loading, setLoading] = useState(false)
-  const fileInputRef = useRef(null)
-  const messagesEndRef = useRef(null)
-  const supabase = createClient()
+  const supabase = createClient();
 
+  // tabs / data
+  const [activeTab, setActiveTab] = useState('friends');
+  const [friends, setFriends] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [friendRequests, setFriendRequests] = useState([]);
+
+  // chat
+  const [selectedChat, setSelectedChat] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState('');
+  const messagesEndRef = useRef(null);
+
+  // files
+  const [loading, setLoading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // search
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchError, setSearchError] = useState('');
+
+  // ---------------------------------------------------------------------------
+  // Initial loads
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    loadFriends()
-    loadGroups()
-    loadFriendRequests()
-  }, [])
+    loadFriends();
+    loadGroups();
+    loadFriendRequests();
+  }, []);
 
+  // When chat changes, load + subscribe
   useEffect(() => {
-    if (selectedChat) {
-      loadMessages()
-      subscribeToMessages()
-    }
-  }, [selectedChat])
+    if (!selectedChat) return;
 
+    loadMessages();
+
+    // subscribe and clean up properly when chat changes/unmounts
+    const unsubscribe = subscribeToMessages();
+    return () => {
+      unsubscribe?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChat]);
+
+  // Always scroll to last message
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
+  // Debounced search when searchQuery changes
+  useEffect(() => {
+    const t = setTimeout(() => {
+      runSearch(searchQuery);
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, friends.length]);
+
+  // ---------------------------------------------------------------------------
+  // Data loaders
+  // ---------------------------------------------------------------------------
   const loadFriends = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('friendships')
       .select('*, friend:profiles!friend_id(*)')
       .eq('user_id', session.user.id)
-      .eq('status', 'accepted')
-    
-    if (data) setFriends(data.map(f => f.friend))
-  }
+      .eq('status', 'accepted');
+
+    if (!error && data) {
+      setFriends(
+        data
+          .map((f) => f.friend)
+          .filter(Boolean)
+          .map((p) => ({
+            id: p.id,
+            name: p.full_name || p.name || p.email,
+            email: p.email,
+          }))
+      );
+    }
+  };
 
   const loadGroups = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('group_members')
       .select('*, group:groups(*)')
-      .eq('user_id', session.user.id)
-    
-    if (data) setGroups(data.map(g => g.group))
-  }
+      .eq('user_id', session.user.id);
+
+    if (!error && data) {
+      setGroups(
+        data
+          .map((g) => g.group)
+          .filter(Boolean)
+          .map((g) => ({ id: g.id, name: g.name }))
+      );
+    }
+  };
 
   const loadFriendRequests = async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('friendships')
       .select('*, from:profiles!user_id(*)')
       .eq('friend_id', session.user.id)
-      .eq('status', 'pending')
-    
-    if (data) setFriendRequests(data)
-  }
+      .eq('status', 'pending');
+
+    if (!error && data) setFriendRequests(data);
+  };
 
   const loadMessages = async () => {
     try {
@@ -73,50 +137,117 @@ export default function ChatApp({ session }) {
         supabase,
         selectedChat.type === 'friend' ? selectedChat.id : null,
         selectedChat.type === 'group' ? selectedChat.id : null
-      )
-      setMessages(data)
+      );
+      setMessages(data || []);
     } catch (error) {
-      console.error('Error loading messages:', error)
+      console.error('Error loading messages:', error);
     }
-  }
+  };
 
+  // ---------------------------------------------------------------------------
+  // Realtime subscription
+  // ---------------------------------------------------------------------------
   const subscribeToMessages = () => {
-    const channel = supabase
+    const ch = supabase
       .channel('messages')
       .on(
         'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-        },
+        { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
-          if (
-            (selectedChat.type === 'friend' && payload.new.receiver_id === selectedChat.id) ||
-            (selectedChat.type === 'group' && payload.new.group_id === selectedChat.id)
-          ) {
-            loadMessages()
+          // Only reload for messages related to the open conversation
+          if (selectedChat?.type === 'group') {
+            if (payload.new.group_id === selectedChat.id) {
+              loadMessages();
+            }
+          } else if (selectedChat?.type === 'friend') {
+            const a = session.user.id;
+            const b = selectedChat.id;
+            const { sender_id, receiver_id } = payload.new;
+            const involvesPair =
+              (sender_id === a && receiver_id === b) ||
+              (sender_id === b && receiver_id === a);
+            if (involvesPair) loadMessages();
           }
         }
       )
-      .subscribe()
+      .subscribe();
 
     return () => {
-      supabase.removeChannel(channel)
+      supabase.removeChannel(ch);
+    };
+  };
+
+  // ---------------------------------------------------------------------------
+  // Search (email OR full_name OR name) + friend request
+  // ---------------------------------------------------------------------------
+  async function runSearch(term) {
+    const q = (term || '').trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearchError('');
+      return;
     }
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, email, avatar_url, coalesce(full_name, name) as name')
+      .or(`email.ilike.%${q}%,full_name.ilike.%${q}%,name.ilike.%${q}%`)
+      .neq('id', session.user.id)
+      .limit(20);
+
+    if (error) {
+      setSearchError(error.message || 'Search failed');
+      setSearchResults([]);
+      return;
+    }
+
+    // Mark those who are already friends, so we can disable the button
+    const friendIds = new Set(friends.map((f) => f.id));
+    const rows =
+      (data || []).map((r) => ({
+        id: r.id,
+        name: r.name || r.email,
+        email: r.email,
+        isFriend: friendIds.has(r.id),
+      })) ?? [];
+
+    setSearchError('');
+    setSearchResults(rows);
   }
 
+  async function sendFriendRequest(targetUserId) {
+    // Prevent duplicates
+    const { error } = await supabase.from('friendships').insert({
+      user_id: session.user.id,
+      friend_id: targetUserId,
+      status: 'pending',
+    });
+    if (error) {
+      alert(error.message);
+      return;
+    }
+    alert('Request sent!');
+    setSearchResults((prev) =>
+      prev.map((p) =>
+        p.id === targetUserId ? { ...p, isFriend: true } : p
+      )
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // File + messages
+  // ---------------------------------------------------------------------------
   const handleFileUpload = async (file) => {
-    if (!file) return
+    if (!file) return;
     if (file.size > 100 * 1024 * 1024) {
-      alert('File size exceeds 100MB limit')
-      return
+      alert('File size exceeds 100MB limit');
+      return;
     }
 
-    setLoading(true)
+    setLoading(true);
     try {
-      const { path, url } = await uploadFile(supabase, file, session.user.id)
-      
+      const { path, url } = await uploadFile(supabase, file, session.user.id);
+
       await sendMessage(supabase, {
         sender_id: session.user.id,
         receiver_id: selectedChat.type === 'friend' ? selectedChat.id : null,
@@ -125,30 +256,30 @@ export default function ChatApp({ session }) {
         content: newMessage || 'Shared a file',
         file_name: file.name,
         file_url: url,
-        file_size: file.size
-      })
+        file_size: file.size,
+      });
 
-      setNewMessage('')
-      loadMessages()
+      setNewMessage('');
+      loadMessages();
     } catch (error) {
-      alert('Error uploading file: ' + error.message)
+      alert('Error uploading file: ' + error.message);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const handlePaste = async (e) => {
-    const items = e.clipboardData.items
+    const items = e.clipboardData.items;
     for (let item of items) {
       if (item.type.indexOf('image') !== -1) {
-        const file = item.getAsFile()
-        await handleFileUpload(file)
+        const file = item.getAsFile();
+        await handleFileUpload(file);
       }
     }
-  }
+  };
 
   const handleSendMessage = async () => {
-    if (!newMessage.trim()) return
+    if (!newMessage.trim()) return;
 
     try {
       await sendMessage(supabase, {
@@ -156,30 +287,35 @@ export default function ChatApp({ session }) {
         receiver_id: selectedChat.type === 'friend' ? selectedChat.id : null,
         group_id: selectedChat.type === 'group' ? selectedChat.id : null,
         message_type: 'text',
-        content: newMessage
-      })
+        content: newMessage,
+      });
 
-      setNewMessage('')
-      loadMessages()
+      setNewMessage('');
+      loadMessages();
     } catch (error) {
-      alert('Error sending message: ' + error.message)
+      alert('Error sending message: ' + error.message);
     }
-  }
+  };
 
   const acceptFriendRequest = async (requestId) => {
-    await supabase
+    const { error } = await supabase
       .from('friendships')
       .update({ status: 'accepted' })
-      .eq('id', requestId)
-    
-    loadFriends()
-    loadFriendRequests()
-  }
+      .eq('id', requestId);
+
+    if (!error) {
+      loadFriends();
+      loadFriendRequests();
+    }
+  };
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut()
-  }
+    await supabase.auth.signOut();
+  };
 
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
@@ -187,24 +323,67 @@ export default function ChatApp({ session }) {
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-semibold text-gray-800">DocShare</h1>
-            <button 
+            <button
               onClick={handleSignOut}
               className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
             >
               <LogOut className="w-5 h-5 text-gray-600" />
             </button>
           </div>
-          
+
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
-              placeholder="Search..."
+              placeholder="Search by name or email…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
+
+          {/* Search results dropdown area */}
+          {searchQuery && (
+            <div className="mt-3 max-h-72 overflow-y-auto border border-gray-200 rounded-lg">
+              {searchError ? (
+                <div className="p-3 text-sm text-red-600">{searchError}</div>
+              ) : searchResults.length === 0 ? (
+                <div className="p-3 text-sm text-gray-500">No results</div>
+              ) : (
+                <ul className="divide-y">
+                  {searchResults.map((u) => (
+                    <li key={u.id} className="p-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 text-white flex items-center justify-center text-sm font-semibold">
+                          {(u.name || u.email).charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium">
+                            {u.name}
+                          </div>
+                          <div className="truncate text-xs text-gray-500">
+                            {u.email}
+                          </div>
+                        </div>
+                        {u.isFriend ? (
+                          <span className="inline-flex items-center gap-1 text-green-600 text-xs">
+                            <Check className="w-4 h-4" /> Friend
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => sendFriendRequest(u.id)}
+                            className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+                          >
+                            <UserPlus className="w-4 h-4" /> Add
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex border-b border-gray-200">
@@ -238,7 +417,7 @@ export default function ChatApp({ session }) {
           >
             Requests
             {friendRequests.length > 0 && (
-              <span className="absolute top-2 right-4 w-2 h-2 bg-red-500 rounded-full"></span>
+              <span className="absolute top-2 right-4 w-2 h-2 bg-red-500 rounded-full" />
             )}
           </button>
         </div>
@@ -249,16 +428,23 @@ export default function ChatApp({ session }) {
               {friends.map((friend) => (
                 <button
                   key={friend.id}
-                  onClick={() => setSelectedChat({ type: 'friend', ...friend })}
+                  onClick={() => {
+                    setSelectedChat({ type: 'friend', ...friend });
+                    setSearchQuery('');
+                  }}
                   className="w-full p-4 hover:bg-gray-50 transition-colors border-b border-gray-100 text-left"
                 >
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white font-semibold">
-                      {friend.name?.charAt(0) || 'U'}
+                      {(friend.name || friend.email).charAt(0)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800 truncate">{friend.name}</p>
-                      <p className="text-sm text-gray-500 truncate">{friend.email}</p>
+                      <p className="font-medium text-gray-800 truncate">
+                        {friend.name}
+                      </p>
+                      <p className="text-sm text-gray-500 truncate">
+                        {friend.email}
+                      </p>
                     </div>
                   </div>
                 </button>
@@ -279,7 +465,9 @@ export default function ChatApp({ session }) {
                       <Users className="w-5 h-5" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800 truncate">{group.name}</p>
+                      <p className="font-medium text-gray-800 truncate">
+                        {group.name}
+                      </p>
                     </div>
                   </div>
                 </button>
@@ -293,10 +481,18 @@ export default function ChatApp({ session }) {
                 <div key={request.id} className="p-4 border-b border-gray-100">
                   <div className="flex items-start gap-3">
                     <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-pink-500 rounded-full flex items-center justify-center text-white font-semibold">
-                      {request.from.name?.charAt(0) || 'U'}
+                      {(request.from?.full_name ||
+                        request.from?.name ||
+                        request.from?.email ||
+                        'U'
+                      ).charAt(0)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800">{request.from.name}</p>
+                      <p className="font-medium text-gray-800">
+                        {request.from?.full_name ||
+                          request.from?.name ||
+                          request.from?.email}
+                      </p>
                       <div className="flex gap-2 mt-2">
                         <button
                           onClick={() => acceptFriendRequest(request.id)}
@@ -326,26 +522,38 @@ export default function ChatApp({ session }) {
               {messages.map((msg) => (
                 <div key={msg.id} className="flex gap-3">
                   <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">
-                    {msg.sender?.name?.charAt(0) || 'U'}
+                    {(msg.sender?.full_name ||
+                      msg.sender?.name ||
+                      msg.sender?.email ||
+                      'U'
+                    ).charAt(0)}
                   </div>
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="font-medium text-gray-800 text-sm">{msg.sender?.name}</span>
+                      <span className="font-medium text-gray-800 text-sm">
+                        {msg.sender?.full_name ||
+                          msg.sender?.name ||
+                          msg.sender?.email}
+                      </span>
                       <span className="text-xs text-gray-400">
                         {new Date(msg.created_at).toLocaleTimeString()}
                       </span>
                     </div>
-                    
+
                     {msg.message_type === 'file' ? (
                       <div className="bg-white border border-gray-200 rounded-lg p-4 max-w-md">
                         <div className="flex items-start gap-3">
                           <FileText className="w-5 h-5 text-blue-600" />
                           <div className="flex-1">
-                            <p className="font-medium text-gray-800">{msg.file_name}</p>
-                            <p className="text-sm text-gray-600 mt-1">{msg.content}</p>
+                            <p className="font-medium text-gray-800">
+                              {msg.file_name}
+                            </p>
+                            <p className="text-sm text-gray-600 mt-1">
+                              {msg.content}
+                            </p>
                           </div>
-                          <a 
-                            href={msg.file_url} 
+                          <a
+                            href={msg.file_url}
                             download
                             className="p-2 hover:bg-gray-100 rounded-lg"
                           >
@@ -371,8 +579,8 @@ export default function ChatApp({ session }) {
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onPaste={handlePaste}
-                  onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder="Type a message or paste screenshot (Ctrl+V)..."
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                  placeholder="Type a message or paste screenshot (Ctrl+V)…"
                   disabled={loading}
                   className="flex-1 px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
@@ -405,5 +613,5 @@ export default function ChatApp({ session }) {
         )}
       </div>
     </div>
-  )
+  );
 }
