@@ -181,39 +181,40 @@ export default function ChatApp({ session }) {
   // Search (email OR full_name OR name) + friend request
   // ---------------------------------------------------------------------------
   async function runSearch(term) {
-    const q = (term || '').trim();
-    if (!q) {
-      setSearchResults([]);
-      setSearchError('');
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, email, avatar_url, coalesce(full_name, name) as name')
-      .or(`email.ilike.%${q}%,full_name.ilike.%${q}%,name.ilike.%${q}%`)
-      .neq('id', session.user.id)
-      .limit(20);
-
-    if (error) {
-      setSearchError(error.message || 'Search failed');
-      setSearchResults([]);
-      return;
-    }
-
-    // Mark those who are already friends, so we can disable the button
-    const friendIds = new Set(friends.map((f) => f.id));
-    const rows =
-      (data || []).map((r) => ({
-        id: r.id,
-        name: r.name || r.email,
-        email: r.email,
-        isFriend: friendIds.has(r.id),
-      })) ?? [];
-
+  const q = (term || '').trim();
+  if (!q) {
+    setSearchResults([]);
     setSearchError('');
-    setSearchResults(rows);
+    return;
   }
+
+  // Only columns that actually exist in your profiles table
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, email, avatar_url, name')
+    .or(`email.ilike.%${q}%,name.ilike.%${q}%`)
+    .neq('id', session.user.id)
+    .limit(20);
+
+  if (error) {
+    setSearchError(error.message || 'Search failed');
+    setSearchResults([]);
+    return;
+  }
+
+  const friendIds = new Set(friends.map((f) => f.id));
+
+  const rows = (data || []).map((r) => ({
+    id: r.id,
+    name: r.name || r.email,      // <-- fallback done in JS
+    email: r.email,
+    isFriend: friendIds.has(r.id),
+  }));
+
+  setSearchError('');
+  setSearchResults(rows);
+}
+
 
   async function sendFriendRequest(targetUserId) {
     // Prevent duplicates

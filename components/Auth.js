@@ -1,65 +1,108 @@
-'use client'
+'use client';
 
-import { useState } from 'react'
-import { createClient } from '@/lib/supabase'
-import { Mail, Lock, User, FileText } from 'lucide-react'
+import { useEffect, useState } from 'react';
+import { createClient } from '@/lib/supabase';
+import { Mail, Lock, User, FileText } from 'lucide-react';
 
 export default function Auth() {
-  const [loading, setLoading] = useState(false)
-  const [isSignUp, setIsSignUp] = useState(false)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
-  const [message, setMessage] = useState('')
-  const supabase = createClient()
+  const supabase = createClient();
+
+  const [loading, setLoading] = useState(false);
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [message, setMessage] = useState('');
+
+  // --- helper: ensure a row exists in public.profiles for current user
+  async function ensureProfile(user) {
+    if (!user) return;
+
+    const displayName =
+      user.user_metadata?.full_name ||
+      user.user_metadata?.name ||
+      (name || (user.email ? user.email.split('@')[0] : 'User'));
+
+    await supabase.from('profiles').upsert(
+      {
+        id: user.id,
+        email: user.email,
+        name: displayName,
+        avatar_url: user.user_metadata?.avatar_url ?? null,
+      },
+      { onConflict: 'id' }
+    );
+  }
+
+  // After OAuth redirect (or any reload), if already logged in, upsert profile
+  useEffect(() => {
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        await ensureProfile(session.user);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleAuth = async (e) => {
-    e.preventDefault()
-    setLoading(true)
-    setMessage('')
+    e.preventDefault();
+    setLoading(true);
+    setMessage('');
 
     try {
       if (isSignUp) {
+        // Put the name into user metadata as `full_name`
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
-            data: { name }
-          }
-        })
-        if (error) throw error
-        
-        // Create profile
+            data: { full_name: name },
+            emailRedirectTo: window.location.origin,
+          },
+        });
+        if (error) throw error;
+
+        // If we already have a session (depends on email confirmation settings),
+        // create/update profile. Otherwise the DB trigger will create it on confirm.
         if (data.user) {
-          await supabase.from('profiles').insert([
-            { id: data.user.id, email, name }
-          ])
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session?.user) {
+            await ensureProfile(session.user);
+          }
         }
-        
-        setMessage('Check your email for verification link!')
+
+        setMessage('Check your email for the verification link!');
       } else {
-        const { error } = await supabase.auth.signInWithPassword({
+        const { data, error } = await supabase.auth.signInWithPassword({
           email,
           password,
-        })
-        if (error) throw error
+        });
+        if (error) throw error;
+
+        // ensure profile after normal sign-in
+        if (data?.user) await ensureProfile(data.user);
+        else {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user) await ensureProfile(user);
+        }
       }
-    } catch (error) {
-      setMessage(error.message)
+    } catch (err) {
+      setMessage(err.message || 'Authentication failed');
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const handleGoogleLogin = async () => {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin
-      }
-    })
-    if (error) setMessage(error.message)
-  }
+        redirectTo: window.location.origin, // upon return, useEffect will upsert profile
+      },
+    });
+    if (error) setMessage(error.message);
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center p-4">
@@ -76,11 +119,9 @@ export default function Auth() {
           <form onSubmit={handleAuth} className="space-y-4">
             {isSignUp && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Name
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                   <input
                     type="text"
                     value={name}
@@ -94,11 +135,9 @@ export default function Auth() {
             )}
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Email
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                 <input
                   type="email"
                   value={email}
@@ -111,11 +150,9 @@ export default function Auth() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
                 <input
                   type="password"
                   value={password}
@@ -128,11 +165,13 @@ export default function Auth() {
             </div>
 
             {message && (
-              <div className={`p-3 rounded-lg text-sm ${
-                message.includes('Check') 
-                  ? 'bg-green-50 text-green-700' 
-                  : 'bg-red-50 text-red-700'
-              }`}>
+              <div
+                className={`p-3 rounded-lg text-sm ${
+                  message.toLowerCase().includes('check')
+                    ? 'bg-green-50 text-green-700'
+                    : 'bg-red-50 text-red-700'
+                }`}
+              >
                 {message}
               </div>
             )}
@@ -183,5 +222,5 @@ export default function Auth() {
         </div>
       </div>
     </div>
-  )
+  );
 }
